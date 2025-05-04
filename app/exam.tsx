@@ -1,5 +1,5 @@
 // @ts-nocheck
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   View,
   Text,
@@ -46,18 +46,22 @@ const Exam = () => {
     isCandidateVideoRequired,
     isSuspiciousActivityDetectionRequired,
   } = useLocalSearchParams();
-  const [camera, setCamera] = useState<Camera | null>(null);
   const [hasPermissions, setHasPermissions] = useState(false);
   const [faceDetected, setFaceDetected] = useState(true);
   const [warningCount, setWarningCount] = useState(0);
   const router = useRouter();
   const [isCameraReady, setIsCameraReady] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
   const [location, setLocation] = useState(null);
-
+  const cameraRef = useRef<CameraView>(null);
   const [timeRemaining, setTimeRemaining] = useState(() => {
-    const durationInMinutes = parseInt(duration as string) || 30;
-    return durationInMinutes * 60;
+    return duration * 60;
   });
+  const [cameraMode, setCameraMode] = useState("photo");
+  // const [isCapturing, setIsCapturing] = useState(false); // Lock to prevent overlap
+
+  let isCapturing = false;
+  console.log("duration", duration);
   useEffect(() => {
     let timer;
     if (started && timeRemaining > 0) {
@@ -139,135 +143,120 @@ const Exam = () => {
       .padStart(2, "0")}:${remainingSeconds.toString().padStart(2, "0")}`;
   }, []);
 
+  // const switchCameraMode = async (mode) => {
+  //   setCameraMode(mode);
+  //   console.log("Switching camera mode to:", mode);
+
+  //   for (let attempt = 0; attempt < 10; attempt++) {
+  //     await new Promise((res) => setTimeout(res, 300));
+  //     if (isCameraReady) {
+  //       console.log("Camera mode stabilized:", mode);
+  //       return;
+  //     }
+  //     console.log(`Waiting for camera to be ready [${attempt + 1}]...`);
+  //   }
+
+  //   throw new Error("Camera not ready after switching mode");
+  // };
+
   const captureRandomPhoto = async () => {
-    if (!camera || !isCandidatePhotosRequired) {
-      console.log("Photo Capture Skipped:", {
-        hasCamera: camera,
-        required: isCandidatePhotosRequired,
-      });
+    if (!cameraRef.current || !isCandidatePhotosRequired || isCapturing) {
+      console.log("isCandidatePhotosRequired", isCandidatePhotosRequired);
+      console.log("isCapturing", isCapturing);
+      console.log("Photo capture skipped");
       return;
     }
-
+    isCapturing = true;
     try {
-      // Get current location
-      const currentLocation = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.High,
+      console.log("Switching to Photo Mode...");
+      setCameraMode("photo");
+      console.log("Camera Mode:", cameraMode);
+      console.log("Capturing Photo...");
+      const photo = await cameraRef.current.takePictureAsync({
+        quality: 0.2,
+        shutterSound: false,
       });
 
-      // Get address from coordinates
-      const address = await getLocationAddress(
-        currentLocation.coords.latitude,
-        currentLocation.coords.longitude
-      );
-      const photo = await camera.takePictureAsync({
-        quality: 0.7,
-        skipProcessing: true,
-      });
-      const processedImage = await manipulateAsync(photo.uri, [], {
-        base64: false,
-        format: SaveFormat.JPEG,
-        compress: 0.7,
-        watermark: {
-          text:
-            address ||
-            `Location not available\nTime: ${new Date().toLocaleString()}`,
-          position: "bottomLeft",
-          fontSize: 16,
-          color: "#ffffff",
-          opacity: 0.8,
-        },
-      });
-      const faces = await FaceDetector.detectFacesAsync(photo.uri);
-
-      if (faces.length === 0) {
-        Alert.alert("Warning", "Face not detected");
-      } else if (faces.length > 1) {
-        Alert.alert("Warning", "Multiple faces detected");
-      }
-
+      console.log("Photo captured:", photo);
       const formData = new FormData();
       formData.append("photo", {
-        uri: processedImage.uri,
+        uri: photo.uri,
         type: "image/jpeg",
-        name: `exam_${Date.now()}.jpg`,
+        name: `random_photo${Date.now()}.jpg`,
       });
-
-      // Add test type parameter
       formData.append("testType", examType.toUpperCase());
 
-      const response = await axios.post(
-        `${ip}/candidate/upload-random-photo`,
-        formData,
-        {
-          headers: {
-            "Content-Type": "multipart/form-data",
-            Authorization: `Bearer ${await SecureStore.getItemAsync("token")}`,
-          },
-        }
-      );
+      const token = await SecureStore.getItemAsync("token");
+      await axios.post(`${ip}/candidate/upload-random-photo`, formData, {
+        headers: {
+          "Content-Type": "multipart/form-data",
+          Authorization: `Bearer ${token}`,
+        },
+      });
 
-      console.log("Photo Upload Response:", response.data);
+      console.log("Photo uploaded successfully");
+
+      setCameraMode("video");
+      console.log("Camera Mode:", cameraMode);
     } catch (error) {
-      console.error(
-        "Photo capture error:",
-        error.response?.data?.error || error.message
-      );
+      console.error("Photo capture error:", JSON.stringify(error));
     }
+    isCapturing = false;
+    console.log("iscapturingl", isCapturing);
   };
 
   const captureRandomVideo = async () => {
-    if (!camera || !isCandidateVideoRequired) return;
-
+    if (!cameraRef.current || !isCandidateVideoRequired || isCapturing) {
+      console.log("isCandidatePhotosRequired", isCandidatePhotosRequired);
+      console.log("isCapturing", isCapturing);
+      console.log("Photo capture skipped");
+      return;
+    }
+    isCapturing = true;
     try {
-      camera.recordAsync({ maxDuration: 10 }).then(async (video) => {
-        const formData = new FormData();
-        formData.append("video", {
-          uri: video.uri,
-          type: "video/mp4",
-          name: `exam_${Date.now()}.mp4`,
-        });
-        formData.append("testType", examType.toUpperCase());
+      console.log("Switching to Video Mode...");
+      setCameraMode("video");
+      console.log("Camera Mode:", cameraMode);
 
-        await axios.post(`${ip}/candidate/upload-random-video`, formData, {
-          headers: {
-            "Content-Type": "multipart/form-data",
-            Authorization: `Bearer ${await SecureStore.getItemAsync("token")}`,
-          },
-        });
+      console.log("Recording Video...");
+      const video = await cameraRef.current.recordAsync({ maxDuration: 10 });
+
+      console.log("Video recorded:", video);
+      const formData = new FormData();
+      formData.append("video", {
+        uri: video.uri,
+        type: "video/mp4",
+        name: `video_${Date.now()}.mp4`,
+      });
+      formData.append("testType", examType.toUpperCase());
+
+      const token = await SecureStore.getItemAsync("token");
+      await axios.post(`${ip}/candidate/upload-random-video`, formData, {
+        headers: {
+          "Content-Type": "multipart/form-data",
+          Authorization: `Bearer ${token}`,
+        },
       });
 
-      // Automatically stop after duration
-      setTimeout(() => {
-        camera.stopRecording();
-      }, 10000); // 10s
+      console.log("Video uploaded successfully");
+      setCameraMode("photo");
+      console.log("Camera Mode:", cameraMode);
     } catch (error) {
-      console.error("Video capture error:", error.message);
+      console.error("Video recording error:", error);
     }
+    isCapturing = false;
   };
 
   useEffect(() => {
-    if (!hasPermissions) {
-      console.log("Monitoring Inactive: No Permissions");
-      return;
+    console.log("Camera Mode:", cameraMode);
+    if (cameraMode === "photo") {
+      console.log("Capturing Photo...");
+      captureRandomPhoto();
+    } else if (cameraMode === "video") {
+      console.log("Capturing Video...");
+      captureRandomVideo();
     }
-
-    console.log("Starting Monitoring:", {
-      photoInterval: "60s",
-      videoInterval: "100s",
-      timestamp: Date.now(),
-    });
-
-    const photoInterval = setInterval(captureRandomPhoto, 60000);
-    const videoInterval = setInterval(captureRandomVideo, 100000);
-
-    return () => {
-      console.log("Stopping Monitoring:", {
-        timestamp: Date.now(),
-      });
-      clearInterval(photoInterval);
-      clearInterval(videoInterval);
-    };
-  }, [hasPermissions]);
+  }, [cameraMode]);
 
   const STATUS_COLORS = {
     current: "#2563eb",
@@ -591,11 +580,17 @@ const Exam = () => {
       {hasPermissions &&
         (isCandidatePhotosRequired || isCandidateVideoRequired) && (
           <CameraView
-            ref={setCamera}
+            ref={cameraRef}
             facing="front"
+            mode={cameraMode}
             className="h-0 w-0"
             onCameraReady={() => {
-              console.log("Camera Ready");
+              console.log("Camera Ready in mode:", cameraMode);
+              if (cameraMode === "photo") {
+                captureRandomPhoto();
+              } else if (cameraMode === "video") {
+                captureRandomVideo();
+              }
               setIsCameraReady(true);
             }}
             onError={(error) => {
@@ -614,6 +609,7 @@ const Exam = () => {
             }}
           />
         )}
+
       <View className="flex-1 p-4">
         <View className="mb-4 bg-gray-50 rounded-xl p-2">
           <Picker
