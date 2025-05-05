@@ -8,6 +8,7 @@ import {
   SafeAreaView,
   ScrollView,
   Pressable,
+  BackHandler,
 } from "react-native";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { Picker } from "@react-native-picker/picker";
@@ -20,6 +21,7 @@ import * as FaceDetector from "expo-face-detector";
 import * as MediaLibrary from "expo-media-library";
 import * as Location from "expo-location";
 import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
+import HtmlRenderer from "@/components/HtmlRender";
 
 interface HtmlRendererProps {
   html?: string;
@@ -27,6 +29,15 @@ interface HtmlRendererProps {
   style?: object;
 }
 const Exam = () => {
+  const { width } = useWindowDimensions();
+  const {
+    ip,
+    examType,
+    duration,
+    isCandidatePhotosRequired,
+    isCandidateVideoRequired,
+    isSuspiciousActivityDetectionRequired,
+  } = useLocalSearchParams();
   const [loading, setLoading] = useState(true);
   const [examData, setExamData] = useState(null);
   const [selectedLanguage, setSelectedLanguage] = useState("en");
@@ -37,15 +48,7 @@ const Exam = () => {
   const [questions, setQuestions] = useState([]);
   const [questionStartTimes, setQuestionStartTimes] = useState({});
   const [questionEndTimes, setQuestionEndTimes] = useState({});
-  const { width } = useWindowDimensions();
-  const {
-    ip,
-    examType,
-    duration,
-    isCandidatePhotosRequired,
-    isCandidateVideoRequired,
-    isSuspiciousActivityDetectionRequired,
-  } = useLocalSearchParams();
+
   const [hasPermissions, setHasPermissions] = useState(false);
   const [faceDetected, setFaceDetected] = useState(true);
   const [warningCount, setWarningCount] = useState(0);
@@ -55,40 +58,57 @@ const Exam = () => {
   const [location, setLocation] = useState(null);
   const cameraRef = useRef<CameraView>(null);
   const [timeRemaining, setTimeRemaining] = useState(() => {
-    return duration * 60;
+    const minutes = parseInt(duration as string);
+    return isNaN(minutes) ? 3600 : minutes * 60;
   });
-  const [cameraMode, setCameraMode] = useState("photo");
-  // const [isCapturing, setIsCapturing] = useState(false); // Lock to prevent overlap
 
-  let isCapturing = false;
-  console.log("duration", duration);
+  const [cameraMode, setCameraMode] = useState("picture");
+  const [isCapturing, setIsCapturing] = useState(false);
+
   useEffect(() => {
-    let timer;
-    if (started && timeRemaining > 0) {
-      timer = setInterval(() => {
-        setTimeRemaining((prev) => {
-          if (prev <= 1) {
-            clearInterval(timer);
-            Alert.alert(
-              "Time's up!",
-              "Your exam will be submitted automatically",
-              [
-                {
-                  text: "OK",
-                  onPress: handleSubmit,
-                },
-              ]
-            );
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    }
+    const backHandler = BackHandler.addEventListener(
+      "hardwareBackPress",
+      () => {
+        Alert.alert(
+          "Warning",
+          "You cannot go back during the exam. Please complete and submit your exam.",
+          [{ text: "OK" }]
+        );
+        return true;
+      }
+    );
+
+    return () => backHandler.remove();
+  }, []);
+  useEffect(() => {
+    if (!started || timeRemaining <= 0) return;
+
+    const timer = setInterval(() => {
+      setTimeRemaining((prev) => {
+        if (prev <= 1) {
+          clearInterval(timer);
+          Alert.alert(
+            "Time's up!",
+            "Your exam will be submitted automatically",
+            [{ text: "OK", onPress: handleSubmit }]
+          );
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
 
     return () => clearInterval(timer);
-  }, [started, timeRemaining]);
+  }, [started]);
 
+  const formatTime = useCallback((seconds: number) => {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = seconds % 60;
+    return `${hours.toString().padStart(2, "0")}:${minutes
+      .toString()
+      .padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+  }, []);
   useEffect(() => {
     (async () => {
       const { status: cameraStatus } =
@@ -133,51 +153,39 @@ const Exam = () => {
       return null;
     }
   };
-  const formatTime = useCallback((seconds: number) => {
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const remainingSeconds = seconds % 60;
 
-    return `${hours.toString().padStart(2, "0")}:${minutes
-      .toString()
-      .padStart(2, "0")}:${remainingSeconds.toString().padStart(2, "0")}`;
-  }, []);
+  const switchCameraMode = async (mode) => {
+    setCameraMode(mode);
+    console.log("Switching camera mode to:", mode);
 
-  // const switchCameraMode = async (mode) => {
-  //   setCameraMode(mode);
-  //   console.log("Switching camera mode to:", mode);
+    for (let attempt = 0; attempt < 10; attempt++) {
+      await new Promise((res) => setTimeout(res, 300));
+      if (isCameraReady) {
+        console.log("Camera mode stabilized:", mode);
+        return;
+      }
+      console.log(`Waiting for camera to be ready [${attempt + 1}]...`);
+    }
 
-  //   for (let attempt = 0; attempt < 10; attempt++) {
-  //     await new Promise((res) => setTimeout(res, 300));
-  //     if (isCameraReady) {
-  //       console.log("Camera mode stabilized:", mode);
-  //       return;
-  //     }
-  //     console.log(`Waiting for camera to be ready [${attempt + 1}]...`);
-  //   }
-
-  //   throw new Error("Camera not ready after switching mode");
-  // };
+    throw new Error("Camera not ready after switching mode");
+  };
 
   const captureRandomPhoto = async () => {
-    if (!cameraRef.current || !isCandidatePhotosRequired || isCapturing) {
-      console.log("isCandidatePhotosRequired", isCandidatePhotosRequired);
-      console.log("isCapturing", isCapturing);
-      console.log("Photo capture skipped");
-      return;
-    }
-    isCapturing = true;
+    if (!cameraRef.current || !isCandidatePhotosRequired || isCapturing) return;
+    setIsCapturing(true);
     try {
       console.log("Switching to Photo Mode...");
-      setCameraMode("photo");
-      console.log("Camera Mode:", cameraMode);
+      setIsCameraReady(false);
+
+      await switchCameraMode("picture");
+
       console.log("Capturing Photo...");
       const photo = await cameraRef.current.takePictureAsync({
         quality: 0.2,
         shutterSound: false,
       });
 
-      console.log("Photo captured:", photo);
+      console.log("Photo captured:");
       const formData = new FormData();
       formData.append("photo", {
         uri: photo.uri,
@@ -195,31 +203,30 @@ const Exam = () => {
       });
 
       console.log("Photo uploaded successfully");
-
-      setCameraMode("video");
-      console.log("Camera Mode:", cameraMode);
     } catch (error) {
-      console.error("Photo capture error:", JSON.stringify(error));
+      console.error("Photo capture error:", {
+        message: error.message,
+        code: error.code,
+        cameraReady: isCameraReady,
+        mode: cameraMode,
+      });
+    } finally {
+      setIsCapturing(false);
     }
-    isCapturing = false;
-    console.log("iscapturingl", isCapturing);
   };
 
   const captureRandomVideo = async () => {
-    if (!cameraRef.current || !isCandidateVideoRequired || isCapturing) {
-      console.log("isCandidatePhotosRequired", isCandidatePhotosRequired);
-      console.log("isCapturing", isCapturing);
-      console.log("Photo capture skipped");
-      return;
-    }
-    isCapturing = true;
+    if (!cameraRef.current || !isCandidateVideoRequired || isCapturing) return;
+    setIsCapturing(true);
     try {
       console.log("Switching to Video Mode...");
-      setCameraMode("video");
-      console.log("Camera Mode:", cameraMode);
+      await switchCameraMode("video");
 
       console.log("Recording Video...");
-      const video = await cameraRef.current.recordAsync({ maxDuration: 10 });
+      const video = await cameraRef.current.recordAsync({
+        maxDuration: 30,
+        quality: "480p",
+      });
 
       console.log("Video recorded:", video);
       const formData = new FormData();
@@ -239,24 +246,48 @@ const Exam = () => {
       });
 
       console.log("Video uploaded successfully");
-      setCameraMode("photo");
-      console.log("Camera Mode:", cameraMode);
     } catch (error) {
       console.error("Video recording error:", error);
     }
-    isCapturing = false;
+    setIsCapturing(false);
+  };
+
+  const startMonitoring = async () => {
+    if (!hasPermissions || !isCameraReady) {
+      console.log("Monitoring Skipped:", { hasPermissions, isCameraReady });
+      return;
+    }
+
+    try {
+      if (isCandidatePhotosRequired && !isCapturing) {
+        console.log("Starting Photo Capture");
+        await captureRandomPhoto();
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+
+      if (isCandidateVideoRequired && !isCapturing) {
+        console.log("Starting Video Capture");
+        await captureRandomVideo();
+      }
+      startMonitoring();
+    } catch (error) {
+      console.error("Monitoring Error:", error);
+
+      setTimeout(startMonitoring, 5000);
+    }
   };
 
   useEffect(() => {
-    console.log("Camera Mode:", cameraMode);
-    if (cameraMode === "photo") {
-      console.log("Capturing Photo...");
-      captureRandomPhoto();
-    } else if (cameraMode === "video") {
-      console.log("Capturing Video...");
-      captureRandomVideo();
+    if (hasPermissions && isCameraReady) {
+      console.log("Starting Monitoring Sequence");
+      startMonitoring();
     }
-  }, [cameraMode]);
+
+    return () => {
+      console.log("Stopping Monitoring Sequence");
+    };
+  }, [hasPermissions, isCameraReady]);
 
   const STATUS_COLORS = {
     current: "#2563eb",
@@ -292,10 +323,9 @@ const Exam = () => {
 
         setQuestions(questions);
         setQuestionStatus(new Array(questions.length).fill("default"));
-        setTimeRemaining(30 * 60);
-
         const now = new Date().toISOString();
         setQuestionStartTimes({ [questions[0]._id]: now });
+        setStarted(true);
       }
     } catch (error) {
       console.error(`${examType} exam fetch error:`, {
@@ -412,6 +442,15 @@ const Exam = () => {
           onPress: async () => {
             try {
               setLoading(true);
+              if (cameraRef.current) {
+                if (isRecording) {
+                  await cameraRef.current.stopRecording();
+                }
+                await cameraRef.current.pausePreview();
+              }
+
+              setIsCapturing(false);
+              setIsCameraReady(false);
               const token = await SecureStore.getItemAsync("token");
 
               if (!token) {
@@ -466,9 +505,12 @@ const Exam = () => {
               );
 
               console.log("Test submission result:", testResult.data);
-
+              if (cameraRef.current) {
+                cameraRef.current = null;
+              }
+              setHasPermissions(false);
               Alert.alert("Success", "Exam submitted successfully!", [
-                { text: "OK", onPress: () => router.push("/result") },
+                { text: "OK", onPress: () => router.push("/exam_completed") },
               ]);
             } catch (error) {
               console.error(
@@ -488,48 +530,6 @@ const Exam = () => {
       { cancelable: true }
     );
   };
-
-  const HtmlRenderer: React.FC<HtmlRendererProps> = React.memo(
-    ({ html = "", width = 300, style = {} }) => {
-      const source = React.useMemo(() => ({ html }), [html]);
-
-      const baseStyle = React.useMemo(
-        () => ({
-          fontFamily: "system-ui",
-          fontSize: 16,
-          color: "#374151",
-          ...style,
-        }),
-        [style]
-      );
-
-      const renderConfig = React.useMemo(
-        () => ({
-          enableExperimentalBRCollapsing: true,
-          enableExperimentalGhostLinesPrevention: true,
-          renderersProps: {
-            img: { enableExperimentalPercentWidth: true },
-          },
-          systemFonts: ["system-ui"],
-          defaultTextProps: { numberOfLines: 0 },
-        }),
-        []
-      );
-
-      if (!html) return null;
-
-      return (
-        <RenderHTML
-          source={source}
-          contentWidth={width}
-          baseStyle={baseStyle}
-          {...renderConfig}
-        />
-      );
-    }
-  );
-
-  HtmlRenderer.displayName = "HtmlRenderer";
 
   const LANGUAGES = {
     en: "English",
@@ -586,11 +586,6 @@ const Exam = () => {
             className="h-0 w-0"
             onCameraReady={() => {
               console.log("Camera Ready in mode:", cameraMode);
-              if (cameraMode === "photo") {
-                captureRandomPhoto();
-              } else if (cameraMode === "video") {
-                captureRandomVideo();
-              }
               setIsCameraReady(true);
             }}
             onError={(error) => {
@@ -611,26 +606,28 @@ const Exam = () => {
         )}
 
       <View className="flex-1 p-4">
-        <View className="mb-4 bg-gray-50 rounded-xl p-2">
-          <Picker
-            selectedValue={selectedLanguage}
-            onValueChange={setSelectedLanguage}
-          >
-            {Object.entries(getAvailableLanguages(questions)).map(
-              ([code, name]) => (
-                <Picker.Item key={code} label={name} value={code} />
-              )
-            )}
-          </Picker>
+        <View className="flex-row items-center justify-between mb-4 gap-4">
+          <View className="flex-1 w-[48%] bg-gray-50 rounded-md">
+            <Picker
+              selectedValue={selectedLanguage}
+              onValueChange={setSelectedLanguage}
+            >
+              {Object.entries(getAvailableLanguages(questions)).map(
+                ([code, name]) => (
+                  <Picker.Item key={code} label={name} value={code} />
+                )
+              )}
+            </Picker>
+          </View>
+
+          <View className="flex-1 w-[48%] bg-blue-100 p-3 rounded-md">
+            <Text className="text-center text-xl font-bold text-blue-800">
+              Time Left: {formatTime(timeRemaining)}
+            </Text>
+          </View>
         </View>
 
-        <View className="bg-blue-100 p-3 rounded-xl mb-4">
-          <Text className="text-center text-xl font-bold text-blue-800">
-            Time Remaining: {formatTime(timeRemaining)}
-          </Text>
-        </View>
-
-        <View className="flex-1 bg-gray-50 p-4 rounded-xl mb-4">
+        <View className="flex-1 bg-gray-50 p-4 rounded-md mb-4">
           {questions[currentQuestion] && (
             <>
               <View className="flex-row justify-between items-center mb-4">

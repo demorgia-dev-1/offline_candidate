@@ -1,27 +1,30 @@
 // @ts-nocheck
-import React from "react";
+import React, { useMemo } from "react";
 import RenderHTML from "react-native-render-html";
 
-interface HtmlRendererProps {
+type HtmlRendererProps = {
   html: string;
   width: number;
-  style?: object;
+  style?: Record<string, unknown>;
   selectedLanguage?: string;
-}
+};
 
 const HtmlRenderer = ({
-  html,
-  width,
+  html = "",
+  width = 300,
   style = {},
   selectedLanguage = "en",
-}: HtmlRendererProps): React.ReactElement | null => {
-  const source = React.useMemo(() => ({ html }), [html]);
+}: HtmlRendererProps) => {
+  if (!html) return null;
 
-  const isRTL = React.useMemo(() => {
-    return ["ar", "ur"].includes(selectedLanguage);
-  }, [selectedLanguage]);
+  const isRTL = useMemo(
+    () => ["ar", "ur", "he"].includes(selectedLanguage),
+    [selectedLanguage]
+  );
 
-  const baseStyle = React.useMemo(
+  const source = useMemo(() => ({ html }), [html]);
+
+  const baseStyle = useMemo(
     () => ({
       fontFamily: "system-ui",
       fontSize: 16,
@@ -33,7 +36,7 @@ const HtmlRenderer = ({
     [style, isRTL]
   );
 
-  const renderConfig = React.useMemo(
+  const renderConfig = useMemo(
     () => ({
       enableExperimentalBRCollapsing: true,
       enableExperimentalGhostLinesPrevention: true,
@@ -49,8 +52,6 @@ const HtmlRenderer = ({
     [isRTL]
   );
 
-  if (!html) return null;
-
   return (
     <RenderHTML
       source={source}
@@ -61,4 +62,4 @@ const HtmlRenderer = ({
   );
 };
 
-export default React.memo(HtmlRenderer);
+export default HtmlRenderer;
