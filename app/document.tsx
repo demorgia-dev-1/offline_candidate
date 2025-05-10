@@ -17,6 +17,7 @@ import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import axios from "axios";
 import * as FileSystem from "expo-file-system";
 import { CameraView, useCameraPermissions } from "expo-camera";
+import { replaceBaseUrl } from "./utils";
 
 const DocumentScreen = () => {
   const [candidatePhoto, setCandidatePhoto] = useState(null);
@@ -32,6 +33,7 @@ const DocumentScreen = () => {
   const [cameraReady, setCameraReady] = useState(false);
   const [showCamera, setShowCamera] = useState(false);
   const [batchDetails, setBatchDetails] = useState(null);
+  const [isCapturing, setIsCapturing] = useState(false);
 
   const { ip } = useLocalSearchParams();
   const router = useRouter();
@@ -82,18 +84,37 @@ const DocumentScreen = () => {
     })();
   }, []);
 
+  // const isReady = () => {
+  //   return (
+  //     (!batchDetails?.isCandidateSelfieRequired || candidatePhoto) &&
+  //     (!batchDetails?.isCandidateLocationRequired || location) &&
+  //     (!batchDetails?.isCandidateAdharRequired || aadharPhoto || aadharFile)
+  //   );
+  // };
+
   const capturePhoto = async () => {
     if (cameraRef.current && cameraReady) {
+      setIsCapturing(true);
       try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== "granted") {
+          Alert.alert(
+            "Permission Denied",
+            "Location permission is required to capture coordinates."
+          );
+          setIsCapturing(false);
+          return;
+        }
+
+        const currentLocation = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.High,
+        });
+
         const photo = await cameraRef.current.takePictureAsync({
           quality: 0.7,
         });
         setCandidatePhoto(photo.uri);
         setShowCamera(false);
-
-        const currentLocation = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.High,
-        });
         setLocation(currentLocation);
 
         Alert.alert(
@@ -105,6 +126,8 @@ const DocumentScreen = () => {
       } catch (error) {
         console.error("Capture Error:", error);
         Alert.alert("Error", "Failed to capture photo");
+      } finally {
+        setIsCapturing(false);
       }
     }
   };
@@ -228,8 +251,21 @@ const DocumentScreen = () => {
           },
         }
       );
-
-      Alert.alert("Success", "Documents uploaded successfully");
+      if (response.status === 200) {
+        router.push({
+          pathname: "/exam",
+          params: {
+            examType: "theory",
+            ip: ip,
+            duration: batchDetails?.durationInMin,
+            isCandidatePhotosRequired: batchDetails?.isCandidatePhotosRequired,
+            isCandidateVideoRequired: batchDetails?.isCandidateVideoRequired,
+            isSuspiciousActivityDetectionRequired:
+              batchDetails?.isSuspiciousActivityDetectionRequired,
+            sscLogo: batchDetails?.sscLogo,
+          },
+        });
+      }
     } catch (error) {
       console.error("Upload Error:", error.response.data.error);
       Alert.alert("Error", error.response.data.error);
@@ -238,12 +274,28 @@ const DocumentScreen = () => {
     }
   };
 
-  const isReady = candidatePhoto && (aadharPhoto || aadharFile);
-
+  const isReady = candidatePhoto && location && (aadharPhoto || aadharFile);
   return (
     <SafeAreaView className="flex-1 bg-white">
-      <Stack.Screen options={{ title: "Document Verification" }} />
-
+      <Stack.Screen
+        options={{
+          title: "Document Verification",
+          headerTitle: () =>
+            batchDetails?.sscLogo ? (
+              <Image
+                source={{
+                  uri: replaceBaseUrl(batchDetails.sscLogo, ip), // Replace {{BASE_URL}} with IP
+                }}
+                style={{ width: 120, height: 40, resizeMode: "contain" }}
+              />
+            ) : (
+              <Text style={{ fontSize: 18, fontWeight: "bold" }}>
+                Document Verification
+              </Text>
+            ),
+          headerTitleAlign: "center", // Center the logo in the header
+        }}
+      />
       {loading ? (
         <View className="flex-1 justify-center items-center">
           <ActivityIndicator size="large" color="#2563eb" />
@@ -270,9 +322,14 @@ const DocumentScreen = () => {
                 <View className="flex-1 justify-end items-center pb-6">
                   <Pressable
                     onPress={capturePhoto}
-                    className="bg-blue-600 px-6 py-3 rounded-full"
+                    disabled={isCapturing} // Disable button while capturing
+                    className={`px-6 py-3 rounded-full ${
+                      isCapturing ? "bg-gray-400" : "bg-blue-600"
+                    }`} // Change color when disabled
                   >
-                    <Text className="text-white font-medium">Take Photo</Text>
+                    <Text className="text-white font-medium">
+                      {isCapturing ? "Capturing..." : "Take Photo"}
+                    </Text>
                   </Pressable>
                 </View>
               </CameraView>
@@ -351,20 +408,6 @@ const DocumentScreen = () => {
               <Pressable
                 onPress={async () => {
                   await handleSubmit();
-                  router.push({
-                    pathname: "/exam",
-                    params: {
-                      examType: "theory",
-                      ip: ip,
-                      duration: batchDetails?.durationInMin,
-                      isCandidatePhotosRequired:
-                        batchDetails?.isCandidatePhotosRequired,
-                      isCandidateVideoRequired:
-                        batchDetails?.isCandidateVideoRequired,
-                      isSuspiciousActivityDetectionRequired:
-                        batchDetails?.isSuspiciousActivityDetectionRequired,
-                    },
-                  });
                 }}
                 disabled={!isReady}
                 className={`flex-1 py-3 rounded-md ${
@@ -391,6 +434,7 @@ const DocumentScreen = () => {
                           batchDetails?.isCandidateVideoRequired,
                         isSuspiciousActivityDetectionRequired:
                           batchDetails?.isSuspiciousActivityDetectionRequired,
+                        sscLogo: batchDetails?.sscLogo,
                       },
                     });
                   }}
