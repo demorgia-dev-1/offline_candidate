@@ -9,6 +9,7 @@ import {
   ScrollView,
   Pressable,
   BackHandler,
+  Image,
 } from "react-native";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { Picker } from "@react-native-picker/picker";
@@ -22,6 +23,8 @@ import * as MediaLibrary from "expo-media-library";
 import * as Location from "expo-location";
 import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
 import HtmlRenderer from "@/components/HtmlRender";
+import Toast from "react-native-toast-message";
+import { replaceBaseUrl } from "./utils";
 
 interface HtmlRendererProps {
   html?: string;
@@ -37,6 +40,7 @@ const Exam = () => {
     isCandidatePhotosRequired,
     isCandidateVideoRequired,
     isSuspiciousActivityDetectionRequired,
+    sscLogo,
   } = useLocalSearchParams();
   const [loading, setLoading] = useState(true);
   const [examData, setExamData] = useState(null);
@@ -48,10 +52,10 @@ const Exam = () => {
   const [questions, setQuestions] = useState([]);
   const [questionStartTimes, setQuestionStartTimes] = useState({});
   const [questionEndTimes, setQuestionEndTimes] = useState({});
-
+  const [isExamSubmitted, setIsExamSubmitted] = useState(false);
   const [hasPermissions, setHasPermissions] = useState(false);
-  const [faceDetected, setFaceDetected] = useState(true);
-  const [warningCount, setWarningCount] = useState(0);
+  // const [faceDetected, setFaceDetected] = useState(true);
+  // const [faceCount, setFaceCount] = useState(0);
   const router = useRouter();
   const [isCameraReady, setIsCameraReady] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
@@ -66,32 +70,13 @@ const Exam = () => {
   const [isCapturing, setIsCapturing] = useState(false);
 
   useEffect(() => {
-    const backHandler = BackHandler.addEventListener(
-      "hardwareBackPress",
-      () => {
-        Alert.alert(
-          "Warning",
-          "You cannot go back during the exam. Please complete and submit your exam.",
-          [{ text: "OK" }]
-        );
-        return true;
-      }
-    );
-
-    return () => backHandler.remove();
-  }, []);
-  useEffect(() => {
     if (!started || timeRemaining <= 0) return;
 
     const timer = setInterval(() => {
       setTimeRemaining((prev) => {
         if (prev <= 1) {
           clearInterval(timer);
-          Alert.alert(
-            "Time's up!",
-            "Your exam will be submitted automatically",
-            [{ text: "OK", onPress: handleSubmit }]
-          );
+          handleSubmit();
           return 0;
         }
         return prev - 1;
@@ -109,6 +94,7 @@ const Exam = () => {
       .toString()
       .padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
   }, []);
+
   useEffect(() => {
     (async () => {
       const { status: cameraStatus } =
@@ -133,26 +119,6 @@ const Exam = () => {
       setHasPermissions(hasPermissions);
     })();
   }, []);
-  const getLocationAddress = async (latitude: number, longitude: number) => {
-    try {
-      const location = await Location.reverseGeocodeAsync({
-        latitude,
-        longitude,
-      });
-
-      if (location[0]) {
-        const { street, city, region, country } = location[0];
-
-        return `Location: ${
-          street ? street + ", " : ""
-        }${city}, ${region}, ${country}\nTime: ${new Date().toLocaleString()}`;
-      }
-      return null;
-    } catch (error) {
-      console.error("Geocoding error:", error);
-      return null;
-    }
-  };
 
   const switchCameraMode = async (mode) => {
     setCameraMode(mode);
@@ -282,11 +248,21 @@ const Exam = () => {
     if (hasPermissions && isCameraReady) {
       console.log("Starting Monitoring Sequence");
       startMonitoring();
-    }
 
-    return () => {
-      console.log("Stopping Monitoring Sequence");
-    };
+      const intervalId = setInterval(() => {
+        const hasResponses = Object.keys(answers).length > 0;
+        if (hasResponses) {
+          submitResponsesPeriodically();
+        } else {
+          console.log("No responses to submit.");
+        }
+      }, 4000); //
+
+      return () => {
+        console.log("Stopping Monitoring Sequence");
+        clearInterval(intervalId);
+      };
+    }
   }, [hasPermissions, isCameraReady]);
 
   const STATUS_COLORS = {
@@ -326,6 +302,19 @@ const Exam = () => {
         const now = new Date().toISOString();
         setQuestionStartTimes({ [questions[0]._id]: now });
         setStarted(true);
+        const backHandler = BackHandler.addEventListener(
+          "hardwareBackPress",
+          () => {
+            Alert.alert(
+              "Warning",
+              "You cannot go back during the exam. Please complete and submit your exam.",
+              [{ text: "OK" }]
+            );
+            return true;
+          }
+        );
+
+        return () => backHandler.remove();
       }
     } catch (error) {
       console.error(`${examType} exam fetch error:`, {
@@ -408,13 +397,71 @@ const Exam = () => {
     setQuestionStatus(newStatus);
   };
 
-  const isAllAnswered = () => {
+  const isAllAnsweredAndNotMarkedForReview = () => {
     return questions.every(
-      (question) =>
-        answers[question._id] ||
-        questionStatus[questions.findIndex((q) => q._id === question._id)] ===
-          "markForReview"
+      (question, index) =>
+        answers[question._id] && questionStatus[index] !== "markForReview"
     );
+  };
+
+  const goToNextUnansweredOrMarked = () => {
+    const nextQuestionIndex = questions.findIndex(
+      (question, index) =>
+        !answers[question._id] || questionStatus[index] === "markForReview"
+    );
+
+    if (nextQuestionIndex !== -1) {
+      setCurrentQuestion(nextQuestionIndex);
+    }
+  };
+
+  const submitResponsesPeriodically = async () => {
+    try {
+      const token = await SecureStore.getItemAsync("token");
+
+      if (!token) {
+        console.error("Authentication token not found");
+        return;
+      }
+
+      const responses = Object.keys(answers).map((questionId) => ({
+        questionId,
+        answerId: answers[questionId],
+        startedAt: questionStartTimes[questionId],
+        endedAt: questionEndTimes[questionId],
+      }));
+
+      const responseEndpoint =
+        examType === "theory"
+          ? "/candidate/submit-theory-responses"
+          : "/candidate/submit-practical-responses";
+
+      console.log(
+        "Submitting responses to endpoint:",
+        `${ip}${responseEndpoint}`
+      );
+
+      const responsesResult = await axios.post(
+        `${ip}${responseEndpoint}`,
+        { responses },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+      console.log(
+        "Periodic responses submission result:",
+        responsesResult.data
+      );
+    } catch (error) {
+      console.error(
+        "Error during periodic response submission:",
+        error.message
+      );
+    }
   };
 
   const handleSubmit = async () => {
@@ -451,6 +498,7 @@ const Exam = () => {
 
               setIsCapturing(false);
               setIsCameraReady(false);
+              setIsExamSubmitted(true);
               const token = await SecureStore.getItemAsync("token");
 
               if (!token) {
@@ -563,20 +611,40 @@ const Exam = () => {
     );
   };
 
-  const getTranslatedContent = (item, field, language) => {
+  const getTranslatedContent = (item, field, language, ip) => {
     if (!item) return "";
-    if (language === "en") return item[field];
-    return item.translations?.[language] || item[field];
+    const content =
+      language === "en"
+        ? item[field]
+        : item.translations?.[language] || item[field];
+    return replaceBaseUrl(content, ip);
   };
 
   return (
     <SafeAreaView className="flex-1 bg-white">
       <Stack.Screen
         options={{
-          headerShown: false,
+          headerShown: true, // Show the header
           gestureEnabled: false,
+          headerTitle: () =>
+            sscLogo ? (
+              <Image
+                source={{
+                  uri: replaceBaseUrl(sscLogo, ip),
+                }}
+                style={{ width: 120, height: 40, resizeMode: "contain" }}
+              />
+            ) : (
+              <Text style={{ fontSize: 18, fontWeight: "bold" }}>Exam</Text>
+            ),
+          headerTitleAlign: "center",
+          headerStyle: {
+            backgroundColor: "#ffffff", // Optional: Set background color
+          },
+          headerBackVisible: false,
         }}
       />
+
       {hasPermissions &&
         (isCandidatePhotosRequired || isCandidateVideoRequired) && (
           <CameraView
@@ -605,7 +673,7 @@ const Exam = () => {
           />
         )}
 
-      <View className="flex-1 p-4">
+      <ScrollView className="flex-1 p-4">
         <View className="flex-row items-center justify-between mb-4 gap-4">
           <View className="flex-1 w-[48%] bg-gray-50 rounded-md">
             <Picker
@@ -626,8 +694,30 @@ const Exam = () => {
             </Text>
           </View>
         </View>
-
-        <View className="flex-1 bg-gray-50 p-4 rounded-md mb-4">
+        <View className="flex-row justify-between items-center mb-4">
+          <View className="flex-row items-center gap-2">
+            <View
+              className="w-3 h-3 rounded-full"
+              style={{ backgroundColor: STATUS_COLORS.answered }}
+            />
+            <Text className="text-sm text-gray-600">Attempted</Text>
+          </View>
+          <View className="flex-row items-center gap-2">
+            <View
+              className="w-3 h-3 rounded-full"
+              style={{ backgroundColor: STATUS_COLORS.default }}
+            />
+            <Text className="text-sm text-gray-600">Unattempted</Text>
+          </View>
+          <View className="flex-row items-center gap-2">
+            <View
+              className="w-3 h-3 rounded-full"
+              style={{ backgroundColor: STATUS_COLORS.markForReview }}
+            />
+            <Text className="text-sm text-gray-600">Reviewed</Text>
+          </View>
+        </View>
+        <ScrollView className="flex-1 bg-gray-50 p-4 rounded-md mb-4">
           {questions[currentQuestion] && (
             <>
               <View className="flex-row justify-between items-center mb-4">
@@ -658,7 +748,8 @@ const Exam = () => {
                   html={getTranslatedContent(
                     questions[currentQuestion],
                     "title",
-                    selectedLanguage
+                    selectedLanguage,
+                    ip // Pass the IP to replace {{BASE_URL}}
                   )}
                   width={width - 40}
                 />
@@ -697,7 +788,8 @@ const Exam = () => {
                         html={getTranslatedContent(
                           opt,
                           "option",
-                          selectedLanguage
+                          selectedLanguage,
+                          ip // Pass the IP to replace {{BASE_URL}}
                         )}
                         width={width - 80}
                       />
@@ -707,7 +799,8 @@ const Exam = () => {
               </View>
             </>
           )}
-        </View>
+        </ScrollView>
+
         <View className="flex-row justify-between items-center space-x-4 mt-5 mb-3">
           <Pressable
             onPress={handlePrev}
@@ -742,23 +835,42 @@ const Exam = () => {
               <Text className="text-white font-medium">Next</Text>
             </Pressable>
           ) : (
-            isAllAnswered() && (
-              <Pressable
-                onPress={handleSubmit}
-                className="px-5 py-2.5 rounded-md bg-green-600"
-              >
-                <Text className="text-white font-medium">Submit</Text>
-              </Pressable>
-            )
+            <>
+              {!isAllAnsweredAndNotMarkedForReview() ? (
+                <Pressable
+                  onPress={goToNextUnansweredOrMarked}
+                  className="px-5 py-2.5 rounded-md bg-orange-600"
+                >
+                  <Text className="text-white font-medium">
+                    Review Questions
+                  </Text>
+                </Pressable>
+              ) : (
+                <Pressable
+                  onPress={handleSubmit}
+                  className="px-5 py-2.5 rounded-md bg-green-600"
+                >
+                  <Text className="text-white font-medium">Submit</Text>
+                </Pressable>
+              )}
+            </>
           )}
         </View>
-
         <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
+          horizontal={false}
           className="mb-4 border-b border-gray-200 pb-4"
+          contentContainerStyle={{
+            paddingBottom: 40,
+          }}
         >
-          <View className="flex-row gap-2 p-2">
+          <View
+            className="flex-row gap-2 p-2"
+            style={{
+              flexWrap: "wrap",
+              flexDirection: "row",
+              justifyContent: "space-between",
+            }}
+          >
             {questions.map((_, index) => (
               <Pressable
                 key={index}
@@ -784,7 +896,7 @@ const Exam = () => {
             ))}
           </View>
         </ScrollView>
-      </View>
+      </ScrollView>
     </SafeAreaView>
   );
 };

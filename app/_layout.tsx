@@ -4,10 +4,11 @@ import { View, Text, SafeAreaView, Pressable } from "react-native";
 import * as SecureStore from "expo-secure-store";
 import "./global.css";
 import { Ionicons } from "@expo/vector-icons";
+import Toast from "react-native-toast-message";
 
 const Footer = () => (
   <SafeAreaView>
-    <View className="flex-row justify-around items-center py-2">
+    <View className="flex-row justify-around items-center py-1">
       <Text className="text-gray-400 text-xs">Offline assessir v1.0.0</Text>
     </View>
   </SafeAreaView>
@@ -41,7 +42,8 @@ export default function RootLayout() {
           ),
         }}
       />
-      {/* <Footer /> */}
+      <Footer />
+      <Toast />
     </>
   );
 }

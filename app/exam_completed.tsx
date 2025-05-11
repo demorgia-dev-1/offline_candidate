@@ -47,12 +47,12 @@ const ExamComplete = () => {
               You will receive your results shortly.
             </Text>
           </View>
-          <View className="flex-row items-center">
+          {/* <View className="flex-row items-center">
             <Feather name="mail" size={20} color="#15803d" />
             <Text className="ml-2 text-gray-800 text-base">
               Check your email for further instructions.
             </Text>
-          </View>
+          </View> */}
           <View className="flex-row items-center">
             <Feather name="help-circle" size={20} color="#15803d" />
             <Text className="ml-2 text-gray-800 text-base">
