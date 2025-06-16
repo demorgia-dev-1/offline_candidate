@@ -1,10 +1,18 @@
+// @ts-nocheck
 import React from "react";
-import { Stack, useRouter } from "expo-router";
-import { View, Text, SafeAreaView, Pressable } from "react-native";
+import { Stack, useLocalSearchParams, useRouter } from "expo-router";
+import {
+  View,
+  Text,
+  SafeAreaView,
+  Pressable,
+  Alert,
+  TouchableOpacity,
+  Image,
+} from "react-native";
 import * as SecureStore from "expo-secure-store";
 import "./global.css";
 import { Ionicons } from "@expo/vector-icons";
-import Toast from "react-native-toast-message";
 
 const Footer = () => (
   <SafeAreaView>
@@ -13,15 +21,21 @@ const Footer = () => (
     </View>
   </SafeAreaView>
 );
+
+const HeaderLogos = () => (
+  <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+    <Image
+      source={require("../assets/images/demorgia.png")}
+      style={{ width: 100, height: 50, resizeMode: "contain" }}
+    />
+    <Image
+      source={require("../assets/images/skill-india.png")}
+      style={{ width: 40, height: 40, resizeMode: "contain" }}
+    />
+  </View>
+);
 export default function RootLayout() {
   const router = useRouter();
-
-  const handleLogout = async () => {
-    await SecureStore.deleteItemAsync("assessor_token");
-    router.push({
-      pathname: "/candidate_login",
-    });
-  };
 
   return (
     <>
@@ -35,15 +49,29 @@ export default function RootLayout() {
             fontWeight: "bold",
           },
           headerTitleAlign: "center",
+          headerTitle: () => <HeaderLogos />,
+
           headerRight: () => (
-            <Pressable onPress={handleLogout} className="px-4">
+            <TouchableOpacity
+              onPress={async () => {
+                try {
+                  await SecureStore.deleteItemAsync("token");
+
+                  router.push({
+                    pathname: "/",
+                  });
+                } catch (error) {
+                  Alert.alert("Error", error);
+                }
+              }}
+              style={{ paddingHorizontal: 16 }}
+            >
               <Ionicons name="log-out-outline" size={24} color="white" />
-            </Pressable>
+            </TouchableOpacity>
           ),
         }}
       />
       <Footer />
-      <Toast />
     </>
   );
 }

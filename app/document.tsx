@@ -8,6 +8,7 @@ import {
   Alert,
   SafeAreaView,
   ActivityIndicator,
+  ScrollView,
 } from "react-native";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
@@ -17,9 +18,12 @@ import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import axios from "axios";
 import * as FileSystem from "expo-file-system";
 import { CameraView, useCameraPermissions } from "expo-camera";
-import { replaceBaseUrl } from "./utils";
+import { replaceBaseUrl } from "../utils";
+import { captureRef } from "react-native-view-shot";
 
 const DocumentScreen = () => {
+  const [userName, setUserName] = useState("");
+
   const [candidatePhoto, setCandidatePhoto] = useState(null);
   const [aadharFile, setAadharFile] = useState(null);
   const [location, setLocation] = useState(null);
@@ -34,11 +38,19 @@ const DocumentScreen = () => {
   const [showCamera, setShowCamera] = useState(false);
   const [batchDetails, setBatchDetails] = useState(null);
   const [isCapturing, setIsCapturing] = useState(false);
-
+  const [timestamp, setTimestamp] = useState("");
+  const candidateOverlayRef = useRef(null);
+  const aadharOverlayRef = useRef(null);
   const { ip } = useLocalSearchParams();
   const router = useRouter();
   const cameraRef = useRef(null);
 
+  useEffect(() => {
+    (async () => {
+      const name = await SecureStore.getItemAsync("name");
+      if (name) setUserName(name);
+    })();
+  }, []);
   const fetchBatchDetails = async () => {
     try {
       const token = await SecureStore.getItemAsync("token");
@@ -84,14 +96,6 @@ const DocumentScreen = () => {
     })();
   }, []);
 
-  // const isReady = () => {
-  //   return (
-  //     (!batchDetails?.isCandidateSelfieRequired || candidatePhoto) &&
-  //     (!batchDetails?.isCandidateLocationRequired || location) &&
-  //     (!batchDetails?.isCandidateAdharRequired || aadharPhoto || aadharFile)
-  //   );
-  // };
-
   const capturePhoto = async () => {
     if (cameraRef.current && cameraReady) {
       setIsCapturing(true);
@@ -117,12 +121,22 @@ const DocumentScreen = () => {
         setShowCamera(false);
         setLocation(currentLocation);
 
-        Alert.alert(
-          "Location Captured",
-          `Latitude: ${currentLocation.coords.latitude.toFixed(
-            4
-          )}\nLongitude: ${currentLocation.coords.longitude.toFixed(4)}`
-        );
+        // Set timestamp
+        const now = new Date().toLocaleString();
+        setTimestamp(now);
+
+        // Wait for overlay to render
+        await new Promise((res) => setTimeout(res, 500));
+
+        // Capture overlay view as image
+        const capturedUri = await captureRef(candidateOverlayRef, {
+          format: "jpg",
+          quality: 0.8,
+        });
+
+        setCandidatePhoto(capturedUri);
+
+        Alert.alert("Success", "Location Captured Successfully");
       } catch (error) {
         console.error("Capture Error:", error);
         Alert.alert("Error", "Failed to capture photo");
@@ -151,7 +165,6 @@ const DocumentScreen = () => {
       const result = await ImagePicker.launchCameraAsync({
         mediaTypes: ["images"],
         cameraType: ImagePicker.CameraType.back,
-        allowsEditing: true,
         quality: 0.7,
         aspect: [4, 3],
       });
@@ -159,6 +172,21 @@ const DocumentScreen = () => {
       if (!result.canceled) {
         setAadharPhoto(result.assets[0].uri);
         setAadharFile(null);
+
+        // Set timestamp
+        const now = new Date().toLocaleString();
+        setTimestamp(now);
+
+        // Wait for overlay to render
+        await new Promise((res) => setTimeout(res, 500));
+
+        // Capture overlay view as image
+        const capturedUri = await captureRef(aadharOverlayRef, {
+          format: "jpg",
+          quality: 0.8,
+        });
+
+        setAadharPhoto(capturedUri);
       }
     } catch (error) {
       console.error("Aadhar Photo Error:", error);
@@ -275,6 +303,7 @@ const DocumentScreen = () => {
   };
 
   const isReady = candidatePhoto && location && (aadharPhoto || aadharFile);
+
   return (
     <SafeAreaView className="flex-1 bg-white">
       <Stack.Screen
@@ -282,27 +311,44 @@ const DocumentScreen = () => {
           title: "Document Verification",
           headerTitle: () =>
             batchDetails?.sscLogo ? (
-              <Image
-                source={{
-                  uri: replaceBaseUrl(batchDetails.sscLogo, ip), // Replace {{BASE_URL}} with IP
-                }}
-                style={{ width: 120, height: 40, resizeMode: "contain" }}
-              />
+              <View
+                style={{ flexDirection: "row", alignItems: "center", gap: 8 }}
+              >
+                <Image
+                  source={require("../assets/images/demorgia.png")}
+                  style={{ width: 80, height: 40, resizeMode: "contain" }}
+                />
+                <Image
+                  source={{
+                    uri: replaceBaseUrl(batchDetails.sscLogo, ip),
+                  }}
+                  style={{ width: 60, height: 40, resizeMode: "contain" }}
+                />
+                <Image
+                  source={require("../assets/images/skill-india.png")}
+                  style={{ width: 60, height: 40, resizeMode: "contain" }}
+                />
+              </View>
             ) : (
               <Text style={{ fontSize: 18, fontWeight: "bold" }}>
                 Document Verification
               </Text>
             ),
-          headerTitleAlign: "center", // Center the logo in the header
+          headerTitleAlign: "center",
         }}
       />
+
       {loading ? (
         <View className="flex-1 justify-center items-center">
           <ActivityIndicator size="large" color="#2563eb" />
           <Text className="mt-4 text-gray-600">Uploading documents...</Text>
         </View>
       ) : (
-        <View className="flex-1 px-6 py-8 space-y-8">
+        <ScrollView className="flex-1 px-6 py-5 space-y-8">
+          <Text className="text-lg font-semibold text-center">
+            Welcome,{" "}
+            <Text className="text-green-700">{userName || "Candidate"}!</Text>
+          </Text>
           <Text className="text-2xl font-bold text-center">
             Document Verification
           </Text>
@@ -322,10 +368,10 @@ const DocumentScreen = () => {
                 <View className="flex-1 justify-end items-center pb-6">
                   <Pressable
                     onPress={capturePhoto}
-                    disabled={isCapturing} // Disable button while capturing
+                    disabled={isCapturing}
                     className={`px-6 py-3 rounded-full ${
                       isCapturing ? "bg-gray-400" : "bg-blue-600"
-                    }`} // Change color when disabled
+                    }`}
                   >
                     <Text className="text-white font-medium">
                       {isCapturing ? "Capturing..." : "Take Photo"}
@@ -399,12 +445,12 @@ const DocumentScreen = () => {
             )}
           </View>
 
-          <View className="mt-20">
+          <View className="mt-10">
             <Text className="text-sm text-gray-600 text-center px-4 mb-6">
               Once you've uploaded both documents, start the exam.
             </Text>
 
-            <View className="flex-row justify-between gap-4 px-4">
+            <View className="flex-row justify-between gap-4 px-4 mb-10">
               <Pressable
                 onPress={async () => {
                   await handleSubmit();
@@ -450,8 +496,74 @@ const DocumentScreen = () => {
               )}
             </View>
           </View>
-        </View>
+        </ScrollView>
       )}
+
+      <View
+        ref={candidateOverlayRef}
+        collapsable={false}
+        style={{
+          position: "absolute",
+          left: -9999,
+          width: 300,
+          height: 400,
+          backgroundColor: "#000",
+        }}
+      >
+        {candidatePhoto && (
+          <>
+            <Image
+              source={{ uri: candidatePhoto }}
+              style={{ width: "100%", height: "100%" }}
+            />
+            <View
+              style={{
+                position: "absolute",
+                bottom: 10,
+                left: 10,
+                backgroundColor: "rgba(0,0,0,0.6)",
+                padding: 6,
+                borderRadius: 5,
+              }}
+            >
+              <Text style={{ color: "#fff", fontSize: 12 }}>{timestamp}</Text>
+            </View>
+          </>
+        )}
+      </View>
+
+      <View
+        ref={aadharOverlayRef}
+        collapsable={false}
+        style={{
+          position: "absolute",
+          left: -9999,
+          width: 300,
+          height: 400,
+          backgroundColor: "#000",
+        }}
+      >
+        {aadharPhoto && (
+          <>
+            <Image
+              source={{ uri: aadharPhoto }}
+              style={{ width: "100%", height: "100%" }}
+            />
+            <View
+              style={{
+                position: "absolute",
+                bottom: 10,
+                left: 10,
+                backgroundColor: "rgba(0,0,0,0.6)",
+                padding: 6,
+                borderRadius: 5,
+              }}
+            >
+              <Text style={{ color: "#fff", fontSize: 12 }}>{timestamp}</Text>
+            </View>
+          </>
+        )}
+      </View>
     </SafeAreaView>
   );
 };

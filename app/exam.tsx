@@ -10,21 +10,31 @@ import {
   Pressable,
   BackHandler,
   Image,
+  AppState,
+  ImageBackground,
 } from "react-native";
-import { Stack, useLocalSearchParams, useRouter } from "expo-router";
+import {
+  Stack,
+  useFocusEffect,
+  useLocalSearchParams,
+  useNavigation,
+  useRouter,
+} from "expo-router";
 import { Picker } from "@react-native-picker/picker";
 import axios from "axios";
 import * as SecureStore from "expo-secure-store";
 import RenderHtml, { RenderHTML } from "react-native-render-html";
 import { useWindowDimensions } from "react-native";
 import { Camera, CameraView } from "expo-camera";
-import * as FaceDetector from "expo-face-detector";
+// import * as FaceDetector from "expo-face-detector";
 import * as MediaLibrary from "expo-media-library";
 import * as Location from "expo-location";
-import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
 import HtmlRenderer from "@/components/HtmlRender";
 import Toast from "react-native-toast-message";
-import { replaceBaseUrl } from "./utils";
+import { replaceBaseUrl } from "../utils";
+// import * as tf from "@tensorflow/tfjs";
+// import * as blazeface from "@tensorflow-models/blazeface";
+import ViewShot from "react-native-view-shot";
 
 interface HtmlRendererProps {
   html?: string;
@@ -54,8 +64,6 @@ const Exam = () => {
   const [questionEndTimes, setQuestionEndTimes] = useState({});
   const [isExamSubmitted, setIsExamSubmitted] = useState(false);
   const [hasPermissions, setHasPermissions] = useState(false);
-  // const [faceDetected, setFaceDetected] = useState(true);
-  // const [faceCount, setFaceCount] = useState(0);
   const router = useRouter();
   const [isCameraReady, setIsCameraReady] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
@@ -65,9 +73,40 @@ const Exam = () => {
     const minutes = parseInt(duration as string);
     return isNaN(minutes) ? 3600 : minutes * 60;
   });
+  const [capturedPhotoUri, setCapturedPhotoUri] = useState(null);
 
   const [cameraMode, setCameraMode] = useState("picture");
   const [isCapturing, setIsCapturing] = useState(false);
+  const navigation = useNavigation();
+  const viewShotRef = useRef(null);
+  const questionStartTimesRef = useRef({});
+  const monitoringStartTimeRef = useRef(null);
+  const monitoringIntervalRef = useRef(null);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (nextAppState) => {
+      if (nextAppState === "background" || nextAppState === "inactive") {
+        Alert.alert(
+          "Warning",
+          "You have left the exam screen. Your exam may be auto-submitted."
+        );
+      }
+    });
+
+    return () => subscription.remove();
+  }, []);
+  useFocusEffect(
+    useCallback(() => {
+      const unsubscribe = navigation.addListener("beforeRemove", (e) => {
+        e.preventDefault();
+        Alert.alert("Warning", "You cannot leave the exam before submitting.", [
+          { text: "OK", style: "cancel" },
+        ]);
+      });
+
+      return () => unsubscribe();
+    }, [navigation])
+  );
 
   useEffect(() => {
     if (!started || timeRemaining <= 0) return;
@@ -120,6 +159,12 @@ const Exam = () => {
     })();
   }, []);
 
+  useEffect(() => {
+    if (questions.length > 0 && started) {
+      setQuestionStart(questions[0]._id);
+    }
+  }, [questions, started]);
+
   const switchCameraMode = async (mode) => {
     setCameraMode(mode);
     console.log("Switching camera mode to:", mode);
@@ -151,12 +196,16 @@ const Exam = () => {
         shutterSound: false,
       });
 
-      console.log("Photo captured:");
+      setCapturedPhotoUri(photo.uri);
+      await new Promise((res) => setTimeout(res, 500));
+
+      const uri = await viewShotRef.current.capture();
+
       const formData = new FormData();
       formData.append("photo", {
-        uri: photo.uri,
+        uri,
         type: "image/jpeg",
-        name: `random_photo${Date.now()}.jpg`,
+        name: `timestamped_${Date.now()}.jpg`,
       });
       formData.append("testType", examType.toUpperCase());
 
@@ -170,12 +219,12 @@ const Exam = () => {
 
       console.log("Photo uploaded successfully");
     } catch (error) {
-      console.error("Photo capture error:", {
-        message: error.message,
-        code: error.code,
-        cameraReady: isCameraReady,
-        mode: cameraMode,
-      });
+      // console.error("Photo capture error:", {
+      //   message: error.message,
+      //   code: error.code,
+      //   cameraReady: isCameraReady,
+      //   mode: cameraMode,
+      // });
     } finally {
       setIsCapturing(false);
     }
@@ -211,37 +260,45 @@ const Exam = () => {
         },
       });
 
-      console.log("Video uploaded successfully");
+      // console.log("Video uploaded successfully");
     } catch (error) {
-      console.error("Video recording error:", error);
+      // console.error("Video recording error:", error);
     }
     setIsCapturing(false);
   };
 
-  const startMonitoring = async () => {
+  const startMonitoring = () => {
     if (!hasPermissions || !isCameraReady) {
       console.log("Monitoring Skipped:", { hasPermissions, isCameraReady });
       return;
     }
 
-    try {
-      if (isCandidatePhotosRequired && !isCapturing) {
-        console.log("Starting Photo Capture");
+    if (monitoringIntervalRef.current) return; // Already running
+
+    monitoringStartTimeRef.current = Date.now();
+
+    monitoringIntervalRef.current = setInterval(async () => {
+      const elapsedSeconds = Math.floor(
+        (Date.now() - monitoringStartTimeRef.current) / 1000
+      );
+
+      // Photo: every 10s for first 2min, then every 1min
+      const shouldCapturePhoto =
+        (elapsedSeconds <= 120 && elapsedSeconds % 8 === 0) ||
+        (elapsedSeconds > 120 && elapsedSeconds % 40 === 0);
+
+      // Video: every 1min (60s)
+      const shouldCaptureVideo =
+        elapsedSeconds > 0 && elapsedSeconds % 10 === 0;
+
+      if (shouldCapturePhoto && !isCapturing && isCandidatePhotosRequired) {
         await captureRandomPhoto();
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-
-      if (isCandidateVideoRequired && !isCapturing) {
-        console.log("Starting Video Capture");
+      if (shouldCaptureVideo && !isCapturing && isCandidateVideoRequired) {
         await captureRandomVideo();
       }
-      startMonitoring();
-    } catch (error) {
-      console.error("Monitoring Error:", error);
-
-      setTimeout(startMonitoring, 5000);
-    }
+    }, 1000); // check every second
   };
 
   useEffect(() => {
@@ -249,18 +306,18 @@ const Exam = () => {
       console.log("Starting Monitoring Sequence");
       startMonitoring();
 
-      const intervalId = setInterval(() => {
-        const hasResponses = Object.keys(answers).length > 0;
-        if (hasResponses) {
-          submitResponsesPeriodically();
-        } else {
-          console.log("No responses to submit.");
-        }
-      }, 4000); //
+      // const intervalId = setInterval(() => {
+      //   const hasResponses = Object.keys(answers).length > 0;
+      //   if (hasResponses) {
+      //     submitResponsesPeriodically();
+      //   } else {
+      //     console.log("No responses to submit.");
+      //   }
+      // }, 4000); //
 
       return () => {
         console.log("Stopping Monitoring Sequence");
-        clearInterval(intervalId);
+        // clearInterval(intervalId);
       };
     }
   }, [hasPermissions, isCameraReady]);
@@ -317,11 +374,10 @@ const Exam = () => {
         return () => backHandler.remove();
       }
     } catch (error) {
-      console.error(`${examType} exam fetch error:`, {
-        message: error.message,
-        response: error.response?.data,
-        status: error.response?.status,
-      });
+      console.log(
+        "Error fetching exam data:",
+        JSON.stringify(error.response?.data) || error.message
+      );
 
       const errorMessage =
         error.response?.data?.error ||
@@ -347,11 +403,14 @@ const Exam = () => {
     );
   }
   const setQuestionStart = (questionId) => {
-    const now = new Date().toISOString();
-    setQuestionStartTimes((prev) => ({
-      ...prev,
-      [questionId]: now,
-    }));
+    if (!questionStartTimesRef.current[questionId]) {
+      const now = new Date().toISOString();
+      questionStartTimesRef.current[questionId] = now;
+      setQuestionStartTimes((prev) => ({
+        ...prev,
+        [questionId]: now,
+      }));
+    }
   };
 
   const handleNext = () => {
@@ -370,22 +429,85 @@ const Exam = () => {
     }
   };
 
-  const handleAnswer = (questionId, answerId) => {
+  const jumpToQuestion = (index) => {
+    const questionId = questions[index]._id;
+    setQuestionStart(questionId);
+    setCurrentQuestion(index);
+  };
+
+  const handleAnswer = async (questionId, answerId) => {
     const now = new Date().toISOString();
 
-    if (!questionStartTimes[questionId]) {
-      setQuestionStart(questionId);
+    // Synchronously assign startedAt if missing
+    let startedAt = questionStartTimesRef.current[questionId];
+    if (!startedAt) {
+      startedAt = now;
+      questionStartTimesRef.current[questionId] = startedAt;
+      setQuestionStartTimes((prev) => ({
+        ...prev,
+        [questionId]: startedAt,
+      }));
     }
+
+    const endedAt = now;
+
+    // console.log(`➡️ Question Answered: ${questionId}`);
+    // console.log(`🕒 Started At: ${startedAt}`);
+    // console.log(`🕒 Ended At:   ${endedAt}`);
+    // console.log(`✅ Answer ID: ${answerId}`);
 
     setQuestionEndTimes((prev) => ({
       ...prev,
-      [questionId]: now,
+      [questionId]: endedAt,
     }));
 
     setAnswers((prev) => ({
       ...prev,
       [questionId]: answerId,
     }));
+
+    try {
+      const token = await SecureStore.getItemAsync("token");
+      if (!token) {
+        console.error("❌ Token not found. Cannot submit response.");
+        return;
+      }
+
+      const responseEndpoint =
+        examType === "theory"
+          ? "/candidate/submit-theory-responses"
+          : "/candidate/submit-practical-responses";
+
+      const payload = {
+        responses: [
+          {
+            questionId,
+            answerId,
+            startedAt,
+            endedAt,
+          },
+        ],
+      };
+
+      // console.log("📤 Submitting response:", JSON.stringify(payload, null, 2));
+
+      await axios.post(`${ip}${responseEndpoint}`, payload, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      });
+
+      // console.log(
+      //   `✅ Successfully submitted response for question ${questionId}`
+      // );
+    } catch (err) {
+      console.error("Error submitting answer:", {
+        message: err.message,
+        response: JSON.stringify(err.response?.data || {}),
+        status: err.response?.status,
+      });
+    }
   };
 
   const handleMarkForReview = () => {
@@ -397,184 +519,229 @@ const Exam = () => {
     setQuestionStatus(newStatus);
   };
 
-  const isAllAnsweredAndNotMarkedForReview = () => {
-    return questions.every(
-      (question, index) =>
-        answers[question._id] && questionStatus[index] !== "markForReview"
-    );
-  };
+  // const isAllAnsweredAndNotMarkedForReview = () => {
+  //   return questions.every((question, index) => answers[question._id]);
+  // };
 
   const goToNextUnansweredOrMarked = () => {
-    const nextQuestionIndex = questions.findIndex(
-      (question, index) =>
-        !answers[question._id] || questionStatus[index] === "markForReview"
-    );
+    let nextQuestionIndex = -1;
+
+    for (let i = currentQuestion + 1; i < questions.length; i++) {
+      if (!answers[questions[i]._id] || questionStatus[i] === "markForReview") {
+        nextQuestionIndex = i;
+        break;
+      }
+    }
+
+    if (nextQuestionIndex === -1) {
+      for (let i = 0; i <= currentQuestion; i++) {
+        if (
+          !answers[questions[i]._id] ||
+          questionStatus[i] === "markForReview"
+        ) {
+          nextQuestionIndex = i;
+          break;
+        }
+      }
+    }
 
     if (nextQuestionIndex !== -1) {
       setCurrentQuestion(nextQuestionIndex);
     }
   };
 
-  const submitResponsesPeriodically = async () => {
-    try {
-      const token = await SecureStore.getItemAsync("token");
+  // const submitResponsesPeriodically = async () => {
+  //   try {
+  //     const token = await SecureStore.getItemAsync("token");
 
-      if (!token) {
-        console.error("Authentication token not found");
-        return;
-      }
+  //     if (!token) {
+  //       console.error("Authentication token not found");
+  //       return;
+  //     }
 
-      const responses = Object.keys(answers).map((questionId) => ({
-        questionId,
-        answerId: answers[questionId],
-        startedAt: questionStartTimes[questionId],
-        endedAt: questionEndTimes[questionId],
-      }));
+  //     const responses = Object.keys(answers).map((questionId) => ({
+  //       questionId,
+  //       answerId: answers[questionId],
+  //       startedAt: questionStartTimes[questionId],
+  //       endedAt: questionEndTimes[questionId],
+  //     }));
+  //     console.log("=== Periodic Submission Data ===");
+  //     console.log("answers:", answers);
+  //     console.log("questionStartTimes:", questionStartTimes);
+  //     console.log("questionEndTimes:", questionEndTimes);
+  //     console.log("responses:", responses);
 
-      const responseEndpoint =
-        examType === "theory"
-          ? "/candidate/submit-theory-responses"
-          : "/candidate/submit-practical-responses";
+  //     const responseEndpoint =
+  //       examType === "theory"
+  //         ? "/candidate/submit-theory-responses"
+  //         : "/candidate/submit-practical-responses";
 
-      console.log(
-        "Submitting responses to endpoint:",
-        `${ip}${responseEndpoint}`
-      );
+  //     const responsesResult = await axios.post(
+  //       `${ip}${responseEndpoint}`,
+  //       { responses },
+  //       {
+  //         headers: {
+  //           Authorization: `Bearer ${token}`,
+  //           "Content-Type": "application/json",
+  //         },
+  //       }
+  //     );
 
-      const responsesResult = await axios.post(
-        `${ip}${responseEndpoint}`,
-        { responses },
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-        }
-      );
-
-      console.log(
-        "Periodic responses submission result:",
-        responsesResult.data
-      );
-    } catch (error) {
-      console.error(
-        "Error during periodic response submission:",
-        error.message
-      );
-    }
-  };
+  //     console.log(
+  //       "Periodic responses submission result:",
+  //       responsesResult.data
+  //     );
+  //   } catch (error) {
+  //     console.error(
+  //       "Error during periodic response submission:",
+  //       error.message
+  //     );
+  //   }
+  // };
 
   const handleSubmit = async () => {
+    const allAnswered = questions.every((q) => answers[q._id]);
+    const markedIndexes = questionStatus
+      .map((status, idx) => (status === "markForReview" ? idx : -1))
+      .filter((idx) => idx !== -1);
+    const unansweredIndexes = questions
+      .map((q, idx) => (answers[q._id] ? -1 : idx))
+      .filter((idx) => idx !== -1);
+
+    const alertButtons = [
+      {
+        text: "Review Answers",
+        style: "cancel",
+        onPress: () => {
+          const combined = [...unansweredIndexes, ...markedIndexes].filter(
+            (idx) => idx !== -1
+          );
+          if (combined.length > 0) {
+            const firstIndex = Math.min(...combined);
+            setCurrentQuestion(firstIndex);
+          }
+        },
+      },
+    ];
+
+    if (allAnswered && markedIndexes.length === 0) {
+      alertButtons.push({
+        text: "Submit Exam",
+        style: "destructive",
+        onPress: async () => {
+          try {
+            setLoading(true);
+            if (cameraRef.current) {
+              if (isRecording) {
+                await cameraRef.current.stopRecording();
+              }
+              await cameraRef.current.pausePreview();
+            }
+
+            setIsCapturing(false);
+            setIsCameraReady(false);
+            setIsExamSubmitted(true);
+            const token = await SecureStore.getItemAsync("token");
+
+            if (!token) {
+              Alert.alert("Error", "Authentication token not found");
+              return;
+            }
+
+            const responses = Object.keys(answers).map((questionId) => ({
+              questionId,
+              answerId: answers[questionId],
+              startedAt: questionStartTimes[questionId],
+              endedAt: questionEndTimes[questionId],
+            }));
+
+            console.log("=== Final Submission Data ===");
+            console.log("answers:", answers);
+            console.log("questionStartTimes:", questionStartTimes);
+            console.log("questionEndTimes:", questionEndTimes);
+            console.log("responses:", responses);
+
+            const responseEndpoint =
+              examType === "theory"
+                ? "/candidate/submit-theory-responses"
+                : "/candidate/submit-practical-responses";
+
+            const responsesResult = await axios.post(
+              `${ip}${responseEndpoint}`,
+              { responses },
+              {
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                  "Content-Type": "application/json",
+                },
+              }
+            );
+
+            console.log("Responses submission result:", responsesResult);
+
+            const testEndpoint =
+              examType === "theory"
+                ? "/candidate/submit-theory-test"
+                : "/candidate/submit-practical-test";
+
+            const testResult = await axios.post(
+              `${ip}${testEndpoint}`,
+              {},
+              {
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                  "Content-Type": "application/json",
+                },
+              }
+            );
+
+            console.log("Test submission result:", testResult.data);
+            if (cameraRef.current) {
+              cameraRef.current = null;
+            }
+            setHasPermissions(false);
+            Alert.alert("Success", "Exam submitted successfully!", [
+              {
+                text: "OK",
+                onPress: () =>
+                  router.push({
+                    pathname: "/exam_completed",
+                    params: {
+                      ip,
+                    },
+                  }),
+              },
+            ]);
+          } catch (error) {
+            console.error(
+              "Submit Error:",
+              error.response?.data || error.message
+            );
+            Alert.alert(
+              "Error",
+              error.response?.data?.error || "Failed to submit exam"
+            );
+          } finally {
+            setLoading(false);
+          }
+        },
+      });
+    }
+
     Alert.alert(
       "⚠️ Submit Exam",
       `Please review before final submission:
 
-    📝 Exam Summary
-    ---------------
-    • Total Questions: ${questions.length}
-    • Answered: ${Object.keys(answers).length}
-    • Marked for Review: ${
-      questionStatus.filter((s) => s === "markForReview").length
-    }
+📝 Exam Summary
+---------------
+• Total Questions: ${questions.length}
+• Answered: ${Object.keys(answers).length}
+• Marked for Review: ${
+        questionStatus.filter((s) => s === "markForReview").length
+      }
 
-    ⚠️ Warning: Once submitted, you cannot modify your answers.`,
-      [
-        {
-          text: "Review Answers",
-          style: "cancel",
-        },
-        {
-          text: "Submit Exam",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              setLoading(true);
-              if (cameraRef.current) {
-                if (isRecording) {
-                  await cameraRef.current.stopRecording();
-                }
-                await cameraRef.current.pausePreview();
-              }
-
-              setIsCapturing(false);
-              setIsCameraReady(false);
-              setIsExamSubmitted(true);
-              const token = await SecureStore.getItemAsync("token");
-
-              if (!token) {
-                Alert.alert("Error", "Authentication token not found");
-                return;
-              }
-
-              const responses = Object.keys(answers).map((questionId) => ({
-                questionId,
-                answerId: answers[questionId],
-                startedAt: questionStartTimes[questionId],
-                endedAt: questionEndTimes[questionId],
-              }));
-
-              const responseEndpoint =
-                examType === "theory"
-                  ? "/candidate/submit-theory-responses"
-                  : "/candidate/submit-practical-responses";
-
-              console.log(
-                "Submitting to endpoint:",
-                `${ip}${responseEndpoint}`
-              );
-
-              const responsesResult = await axios.post(
-                `${ip}${responseEndpoint}`,
-                { responses },
-                {
-                  headers: {
-                    Authorization: `Bearer ${token}`,
-                    "Content-Type": "application/json",
-                  },
-                }
-              );
-
-              console.log("Responses submission result:", responsesResult);
-
-              const testEndpoint =
-                examType === "theory"
-                  ? "/candidate/submit-theory-test"
-                  : "/candidate/submit-practical-test";
-
-              const testResult = await axios.post(
-                `${ip}${testEndpoint}`,
-                {},
-                {
-                  headers: {
-                    Authorization: `Bearer ${token}`,
-                    "Content-Type": "application/json",
-                  },
-                }
-              );
-
-              console.log("Test submission result:", testResult.data);
-              if (cameraRef.current) {
-                cameraRef.current = null;
-              }
-              setHasPermissions(false);
-              Alert.alert("Success", "Exam submitted successfully!", [
-                { text: "OK", onPress: () => router.push("/exam_completed") },
-              ]);
-            } catch (error) {
-              console.error(
-                "Submit Error:",
-                error.response?.data || error.message
-              );
-              Alert.alert(
-                "Error",
-                error.response?.data?.error || "Failed to submit exam"
-              );
-            } finally {
-              setLoading(false);
-            }
-          },
-        },
-      ],
+⚠️ Warning: Once submitted, you cannot modify your answers.`,
+      alertButtons,
       { cancelable: true }
     );
   };
@@ -624,22 +791,34 @@ const Exam = () => {
     <SafeAreaView className="flex-1 bg-white">
       <Stack.Screen
         options={{
-          headerShown: true, // Show the header
+          headerShown: true,
           gestureEnabled: false,
           headerTitle: () =>
             sscLogo ? (
-              <Image
-                source={{
-                  uri: replaceBaseUrl(sscLogo, ip),
-                }}
-                style={{ width: 120, height: 40, resizeMode: "contain" }}
-              />
+              <View
+                style={{ flexDirection: "row", alignItems: "center", gap: 8 }}
+              >
+                <Image
+                  source={require("../assets/images/demorgia.png")}
+                  style={{ width: 80, height: 40, resizeMode: "contain" }}
+                />
+                <Image
+                  source={{
+                    uri: replaceBaseUrl(sscLogo, ip),
+                  }}
+                  style={{ width: 100, height: 40, resizeMode: "contain" }}
+                />
+                <Image
+                  source={require("../assets/images/skill-india.png")}
+                  style={{ width: 60, height: 40, resizeMode: "contain" }}
+                />
+              </View>
             ) : (
               <Text style={{ fontSize: 18, fontWeight: "bold" }}>Exam</Text>
             ),
           headerTitleAlign: "center",
           headerStyle: {
-            backgroundColor: "#ffffff", // Optional: Set background color
+            backgroundColor: "#ffffff",
           },
           headerBackVisible: false,
         }}
@@ -659,16 +838,6 @@ const Exam = () => {
             onError={(error) => {
               console.error("Camera Error:", error);
               setIsCameraReady(false);
-            }}
-            onFacesDetected={({ faces }) => {
-              setFaceDetected(faces.length > 0);
-            }}
-            faceDetectorSettings={{
-              mode: FaceDetector.FaceDetectorMode.fast,
-              detectLandmarks: FaceDetector.FaceDetectorLandmarks.none,
-              runClassifications: FaceDetector.FaceDetectorClassifications.none,
-              minDetectionInterval: 1000,
-              tracking: true,
             }}
           />
         )}
@@ -718,6 +887,11 @@ const Exam = () => {
           </View>
         </View>
         <ScrollView className="flex-1 bg-gray-50 p-4 rounded-md mb-4">
+          {questions[currentQuestion] &&
+            (() => {
+              setQuestionStart(questions[currentQuestion]._id);
+              return null;
+            })()}
           {questions[currentQuestion] && (
             <>
               <View className="flex-row justify-between items-center mb-4">
@@ -726,9 +900,9 @@ const Exam = () => {
                     <Text className="text-xl font-bold text-gray-800">
                       Q. {currentQuestion + 1} of {questions.length}
                     </Text>
-                    <Text className="px-2 py-1 bg-blue-100 rounded-full text-blue-600 text-sm">
+                    {/* <Text className="px-2 py-1 bg-blue-100 rounded-full text-blue-600 text-sm">
                       {questions[currentQuestion].marks} marks
-                    </Text>
+                    </Text> */}
                     <Text className="px-2 py-1 bg-yellow-100 rounded-full text-yellow-600 text-sm">
                       {questions[currentQuestion].difficultyLevel}
                     </Text>
@@ -749,7 +923,7 @@ const Exam = () => {
                     questions[currentQuestion],
                     "title",
                     selectedLanguage,
-                    ip // Pass the IP to replace {{BASE_URL}}
+                    ip
                   )}
                   width={width - 40}
                 />
@@ -789,7 +963,7 @@ const Exam = () => {
                           opt,
                           "option",
                           selectedLanguage,
-                          ip // Pass the IP to replace {{BASE_URL}}
+                          ip
                         )}
                         width={width - 80}
                       />
@@ -801,102 +975,142 @@ const Exam = () => {
           )}
         </ScrollView>
 
-        <View className="flex-row justify-between items-center space-x-4 mt-5 mb-3">
-          <Pressable
-            onPress={handlePrev}
-            disabled={currentQuestion === 0}
-            className={`px-5 py-2.5 rounded-md ${
-              currentQuestion === 0 ? "bg-gray-300" : "bg-blue-600"
-            }`}
-          >
-            <Text className="text-white font-medium">Previous</Text>
-          </Pressable>
-
-          <Pressable
-            onPress={handleMarkForReview}
-            className={`px-5 py-2.5 rounded-md ${
-              questionStatus[currentQuestion] === "markForReview"
-                ? "bg-red-600"
-                : "bg-yellow-600"
-            }`}
-          >
-            <Text className="text-white font-medium">
-              {questionStatus[currentQuestion] === "markForReview"
-                ? "Unmark Review"
-                : "Mark for Review"}
-            </Text>
-          </Pressable>
-
-          {currentQuestion < questions.length - 1 ? (
+        <SafeAreaView className="flex-1 bg-white">
+          <View className="flex-row justify-between items-center space-x-4 mt-5 mb-3">
             <Pressable
-              onPress={handleNext}
-              className="px-5 py-2.5 rounded-md bg-blue-600"
+              onPress={handlePrev}
+              disabled={currentQuestion === 0}
+              className={`px-5 py-2.5 rounded-md ${
+                currentQuestion === 0 ? "bg-gray-300" : "bg-blue-600"
+              }`}
             >
-              <Text className="text-white font-medium">Next</Text>
+              <Text className="text-white font-medium">Previous</Text>
             </Pressable>
-          ) : (
-            <>
-              {!isAllAnsweredAndNotMarkedForReview() ? (
-                <Pressable
-                  onPress={goToNextUnansweredOrMarked}
-                  className="px-5 py-2.5 rounded-md bg-orange-600"
-                >
-                  <Text className="text-white font-medium">
-                    Review Questions
-                  </Text>
-                </Pressable>
-              ) : (
-                <Pressable
-                  onPress={handleSubmit}
-                  className="px-5 py-2.5 rounded-md bg-green-600"
-                >
-                  <Text className="text-white font-medium">Submit</Text>
-                </Pressable>
-              )}
-            </>
-          )}
-        </View>
-        <ScrollView
-          horizontal={false}
-          className="mb-4 border-b border-gray-200 pb-4"
-          contentContainerStyle={{
-            paddingBottom: 40,
-          }}
-        >
-          <View
-            className="flex-row gap-2 p-2"
-            style={{
-              flexWrap: "wrap",
-              flexDirection: "row",
-              justifyContent: "space-between",
+
+            <Pressable
+              onPress={handleMarkForReview}
+              className={`px-5 py-2.5 rounded-md ${
+                questionStatus[currentQuestion] === "markForReview"
+                  ? "bg-red-600"
+                  : "bg-yellow-600"
+              }`}
+            >
+              <Text className="text-white font-medium">
+                {questionStatus[currentQuestion] === "markForReview"
+                  ? "Unmark Review"
+                  : "Mark for Review"}
+              </Text>
+            </Pressable>
+
+            {questions.some(
+              (_, index) =>
+                !answers[questions[index]._id] ||
+                questionStatus[index] === "markForReview"
+            ) ? (
+              <Pressable
+                onPress={goToNextUnansweredOrMarked}
+                className="px-5 py-2.5 rounded-md bg-blue-600"
+              >
+                <Text className="text-white font-medium">Next</Text>
+              </Pressable>
+            ) : (
+              <Pressable
+                disabled
+                className="px-5 py-2.5 rounded-md bg-gray-300"
+              >
+                <Text className="text-white font-medium">Next</Text>
+              </Pressable>
+            )}
+          </View>
+          {/* {isAllAnsweredAndNotMarkedForReview() && ( */}
+          <View className="mt-2 mb-3">
+            <Pressable
+              onPress={handleSubmit}
+              className="px-5 py-3 w-full rounded-md bg-green-600 mx-auto"
+              style={{
+                alignSelf: "center",
+              }}
+            >
+              <Text className="text-white font-medium text-center">Submit</Text>
+            </Pressable>
+          </View>
+          {/* )} */}
+
+          <ScrollView
+            horizontal={false}
+            className="mb-4 border-b border-gray-200 pb-4"
+            contentContainerStyle={{
+              paddingBottom: 40,
             }}
           >
-            {questions.map((_, index) => (
-              <Pressable
-                key={index}
-                onPress={() => setCurrentQuestion(index)}
-                className={`w-10 h-10 rounded-full justify-center items-center ${
-                  currentQuestion === index ? "border-2 border-blue-500" : ""
-                }`}
-                style={{
-                  backgroundColor: STATUS_COLORS.default,
-                  ...(currentQuestion === index && {
-                    backgroundColor: STATUS_COLORS.current,
-                  }),
-                  ...(answers[questions[index]?._id] && {
-                    backgroundColor: STATUS_COLORS.answered,
-                  }),
-                  ...(questionStatus[index] === "markForReview" && {
-                    backgroundColor: STATUS_COLORS.markForReview,
-                  }),
-                }}
-              >
-                <Text className="text-white font-medium">{index + 1}</Text>
-              </Pressable>
-            ))}
-          </View>
-        </ScrollView>
+            <View
+              className="flex-row gap-2 p-2"
+              style={{
+                flexWrap: "wrap",
+                flexDirection: "row",
+                justifyContent: "space-between",
+              }}
+            >
+              {questions.map((_, index) => (
+                <Pressable
+                  key={index}
+                  onPress={() => setCurrentQuestion(index)}
+                  className={`w-10 h-10 rounded-full justify-center items-center ${
+                    currentQuestion === index ? "border-2 border-blue-500" : ""
+                  }`}
+                  style={{
+                    backgroundColor: STATUS_COLORS.default,
+                    ...(currentQuestion === index && {
+                      backgroundColor: STATUS_COLORS.current,
+                    }),
+                    ...(answers[questions[index]?._id] && {
+                      backgroundColor: STATUS_COLORS.answered,
+                    }),
+                    ...(questionStatus[index] === "markForReview" && {
+                      backgroundColor: STATUS_COLORS.markForReview,
+                    }),
+                  }}
+                >
+                  <Text className="text-white font-medium">{index + 1}</Text>
+                </Pressable>
+              ))}
+            </View>
+          </ScrollView>
+        </SafeAreaView>
       </ScrollView>
+
+      <ViewShot
+        ref={viewShotRef}
+        options={{ format: "jpg", quality: 0.9 }}
+        style={{
+          position: "absolute",
+          top: -9999,
+          left: -9999,
+          width: 300,
+          height: 400,
+        }}
+      >
+        {capturedPhotoUri && (
+          <ImageBackground
+            source={{ uri: capturedPhotoUri }}
+            style={{ width: 300, height: 400 }}
+          >
+            <Text
+              style={{
+                position: "absolute",
+                bottom: 10,
+                right: 10,
+                color: "white",
+                fontSize: 14,
+                backgroundColor: "rgba(0,0,0,0.5)",
+                padding: 4,
+              }}
+            >
+              {new Date().toLocaleString()}
+            </Text>
+          </ImageBackground>
+        )}
+      </ViewShot>
     </SafeAreaView>
   );
 };

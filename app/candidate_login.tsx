@@ -54,9 +54,10 @@ export default function CandidateLogin() {
       console.log("Response Data:", response.data);
 
       if (response.status === 200) {
-        const { token } = response.data;
+        const { token, name } = response.data;
         try {
           await SecureStore.setItemAsync("token", token);
+          await SecureStore.setItemAsync("name", name);
 
           router.push({
             pathname: "/document",
